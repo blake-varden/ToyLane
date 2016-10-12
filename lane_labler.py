@@ -432,7 +432,7 @@ class Controller(object):
         else:
             self.transformation_matrix = Controller.get_perspective_transform()
             self.inverse_transformation_matrix = Controller.get_inverse_perspective_transform()  
-            self.y_coordinates = [10,380,470]           
+            self.y_coordinates = [10,320,470]           
             self.recording = Recording(image_files=images, 
                 topdown_to_front_transformation=self.inverse_transformation_matrix, 
                 front_to_topdown_transformation=self.transformation_matrix, 
