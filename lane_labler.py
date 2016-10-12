@@ -37,7 +37,7 @@ def compute_bezier_points(anchor_points, n):
 
 class Recording(object):
     DELETED = 'deleted'
-    def __init__(self, recording_file=None, image_files=None, front_to_topdown_transformation=None, topdown_to_front_transformation=None, transformation_size=None):
+    def __init__(self, recording_file=None, image_files=None, front_to_topdown_transformation=None, topdown_to_front_transformation=None, transformation_size=None, y_coordinates=None):
         if recording_file:
             self.load(recording_file)
         elif (image_files is not None and front_to_topdown_transformation is not None and topdown_to_front_transformation is not None and transformation_size):
@@ -46,6 +46,7 @@ class Recording(object):
             self.front_to_topdown_transformation = front_to_topdown_transformation
             self.topdown_to_front_transformation = topdown_to_front_transformation
             self.transformation_size = transformation_size
+            self.y_coordinates = y_coordinates
             # empty lane data for each image
             for image_file in image_files:
                 self.lanes[image_file] = {}
@@ -65,6 +66,7 @@ class Recording(object):
         self.front_to_topdown_transformation = recording['front_to_topdown_transformation']
         self.topdown_to_front_transformation = recording['topdown_to_front_transformation']
         self.transformation_size = recording['transformation_size']
+        self.y_coordinates = recording['y_coordinates']           
 
     def save(self, output_file, backup=False):
         debug("Saving recording to " + output_file)
@@ -73,7 +75,8 @@ class Recording(object):
             'lanes' : self.lanes,
             'front_to_topdown_transformation' : self.front_to_topdown_transformation,
             'topdown_to_front_transformation' : self.topdown_to_front_transformation,
-            'transformation_size' : self.transformation_size
+            'transformation_size' : self.transformation_size,
+            'y_coordinates' : self.y_coordinates
         }
         with open(output_file, 'w') as f:
             pickle.dump(output, f)
@@ -392,8 +395,10 @@ class ImagePlayer(object):
         self.frame+=1
         self.update()
         if self.on_new_frame:
+            num_prev_frames = max(1,self.fps/4)
+            prev_image_files =self.images[max(0,self.frame-num_prev_frames):self.frame]
             image_file = self.images[self.frame]
-            self.on_new_frame(image_file, self.frame)
+            self.on_new_frame(image_file, prev_image_files, self.frame)
         
         frame_delay = self.compute_frame_delay()
         
@@ -406,8 +411,8 @@ class ImagePlayer(object):
 
 class Controller(object):
 
-    transformation_size = 680
-
+    transformation_size = (640, 480)
+    
     """
     Class that contains all the lanes, UI buttons and controls the movement and drawing of the lanes
     """
@@ -416,20 +421,26 @@ class Controller(object):
         """
         """
         self.master = tk.Tk()
-        self.transformation_matrix = Controller.get_perspective_transform()
-        self.inverse_transformation_matrix = Controller.get_inverse_perspective_transform()
+
         self.recording_file = recording_file
         self.load_recording = load_recording
         if load_recording:
             self.recording = Recording(recording_file=recording_file)
+            self.transformation_matrix = self.recording.front_to_topdown_transformation
+            self.inverse_transformation_matrix = self.recording.topdown_to_front_transformation
+            self.y_coordinates = self.recording.y_coordinates        
         else:
+            self.transformation_matrix = Controller.get_perspective_transform()
+            self.inverse_transformation_matrix = Controller.get_inverse_perspective_transform()  
+            self.y_coordinates = [10,380,470]           
             self.recording = Recording(image_files=images, 
                 topdown_to_front_transformation=self.inverse_transformation_matrix, 
                 front_to_topdown_transformation=self.transformation_matrix, 
-                transformation_size=self.transformation_size)
+                transformation_size=self.transformation_size,
+                y_coordinates = self.y_coordinates)
         self.images = images
         self.speed_profile = speed_profile if speed_profile else [fps] * len(images)
-        self.topdown_canvas = tk.Canvas(self.master, width=self.transformation_size , height=self.transformation_size)
+        self.topdown_canvas = tk.Canvas(self.master, width=self.transformation_size[0], height=self.transformation_size[1])
         self.front_canvas = tk.Canvas(self.master, width=640 , height=480)
         self.front_canvas.pack(side='right', expand=False, fill='none')
         self.topdown_canvas.pack()  
@@ -453,7 +464,7 @@ class Controller(object):
         self.topdown_player.go_to_frame(frame)
         self.front_player.go_to_frame(frame)
         image = self.images[frame]
-        self.next_frame(image, frame)
+        self.next_frame(image, None, frame)
 
     def run(self):
         tk.mainloop() 
@@ -473,7 +484,7 @@ class Controller(object):
         self.set_fps(self.fps - 1)
         
 
-    def next_frame(self, image, frame):
+    def next_frame(self, image, prev_image_files, frame):
         """
         Plays Back the recording.  The recording will be update dby any movement
         """
@@ -507,6 +518,10 @@ class Controller(object):
                     selected_index = selected_lane.selected_index
                     selected_anchor = selected_lane.anchor_points[selected_index]                    
                     self.recording.update_lane_anchor(image, lane_id, selected_index, selected_anchor)
+                    # two most recent frames have the same anchors to account for slow reaction time in user
+                    if prev_image_files is not None:
+                        for prev_image in prev_image_files:
+                            self.recording.update_lane_anchor(prev_image, lane_id, selected_index, selected_anchor)
 
                 anchor_points = list(lane_data['anchor_points'])                
                 self.update_lane(lane_id, anchor_points)
@@ -613,7 +628,7 @@ class Controller(object):
             self.is_shift_pressed = True
         if event.keysym == 'n':
             debug("creating a lane")
-            anchor_points = [[event.x, 100], [event.x,300], [event.x, 500]]
+            anchor_points = [[event.x, self.y_coordinates[0]], [event.x, self.y_coordinates[1]], [event.x, self.y_coordinates[2]]]
             # visually create the  lane
             lane_id = self.create_lane(None, anchor_points)
             image = self.topdown_player.get_frame_image()
@@ -643,7 +658,9 @@ class Controller(object):
         # update anchor points of the
         anchor_index =  topdown_lane.selected_index
         anchor_points = list(topdown_lane.anchor_points)
+        anchor_point[1] = anchor_points[anchor_index][1]
         anchor_points[anchor_index] = anchor_point
+        
         self.update_lane(lane_id, anchor_points, record=False)
         
         image = self.topdown_player.get_frame_image()                        
@@ -675,10 +692,10 @@ class Controller(object):
         p4 = (383, 414) # bottom right
 
         pts1 = np.float32([list(p1),list(p2),list(p3),list(p4)])
-        output_width = 100
+        output_width = 85
         output_height = 35
-        dx=250
-        dy=585
+        dx=276
+        dy=400
         pts2 = np.float32([[dx,dy],[dx+output_width,dy],[dx,dy+output_height],[dx+output_width,dy+output_height]])
         if inverse:
             M = cv2.getPerspectiveTransform(pts2,pts1)
@@ -695,7 +712,7 @@ class Controller(object):
     def load_topdown_image(self, image_filename):
         img = cv2.imread(image_filename)
         img = cv2.cvtColor(img, cv2.cv.CV_BGR2RGB)
-        dst = cv2.warpPerspective(img, self.transformation_matrix, (self.transformation_size, self.transformation_size))
+        dst = cv2.warpPerspective(img, self.transformation_matrix, (self.transformation_size[0], self.transformation_size[1]))
         dst = cv2.cvtColor(dst, cv2.cv.CV_BGR2RGB)
         dst_img = Image.fromarray(dst)
         dst_img = ImageTk.PhotoImage(dst_img)
