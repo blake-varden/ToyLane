@@ -4,10 +4,9 @@ import time
 import json
 import os
 import shutil
-
-
+import glob
 class ModelHistory(object):
-	def __init__(self, history_dir, meta, params):
+	def __init__(self, history_dir, name, meta, params):
 		# directory containing all our models
 		self.history_dir = history_dir
 		self.notes_file = history_dir + '/history.txt'
@@ -17,8 +16,8 @@ class ModelHistory(object):
 
 		self.create_history_dir()
 		self.model_number = self.get_model_number()
-		self.model_name = 'model_' + str(self.model_number)
-		self.model_dir = self.history_dir + '/' + self.model_name
+		self.model_name = name
+		self.model_dir = self.history_dir + '/' + self.model_name + "_" + self.model_number
 		self.model_save = self.model_dir + '/model'
 		self.notes_save = self.model_dir + '/notes.json'
 		self.training_history = self.model_dir + '/training_history.pkl'
@@ -33,11 +32,21 @@ class ModelHistory(object):
 			os.makedirs(self.history_dir)
 
 	def get_model_number(self):
+
 		if not os.path.exists(self.notes_file):
 			return 0        	
+		old_model_numbers = []
 		with open(self.notes_file) as f:
-			model_num = len(f.readlines())
-			return model_num
+			for line in f:
+				line = line.strip()
+				j = json.loads(line)
+				if j['name'] == self.name:
+					old_model_numbers.append(j['model_number'])
+				
+		if not old_model_numbers:
+			return 0
+
+		return max(old_model_numbers) + 1
 
 	def update_model_history(self):
 		history = self.get_history()
@@ -49,6 +58,7 @@ class ModelHistory(object):
 	def get_history(self):
 		return {
 			'name' : self.model_name,
+			'number' : self.number,
 			'meta' : self.meta,
 			'params' : self.params
 		}

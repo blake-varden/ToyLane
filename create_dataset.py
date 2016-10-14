@@ -1,6 +1,16 @@
 import numpy as np
 import pickle
 import cv2
+from simplelmdb import Simplelmdb
+import lmdb
+import numpy as np
+import lmdb
+import msgpack
+import msgpack_numpy as m
+m.patch()
+import random
+import shutil
+import os
 
 def get_inverse_perspective_transform(): 
     return Controller.get_perspective_transform(inverse=True)
@@ -89,12 +99,31 @@ def get_anchor_points(source, image_file, use_front=False):
 #     print anchor_points          
     return anchor_points
         
-def calculate_displacements(image, anchor_points):
+def calculate_6_anchor_displacements(image, anchor_points):
     center_x = image.shape[1]/2.0
     displacements = anchor_points[:,0] - center_x
     return displacements
 
-def create_image_data(image, anchor_points, size, shift_percentage):
+def calculate_2_anchor_displacements(image, anchor_points):
+    anchor_points = anchor_points[[2,5],:]
+    center_x = image.shape[1]/2.0
+    displacements = anchor_points[:,0] - center_x
+    return displacements
+
+def calculate_2_anchor_pixel_classification(image, anchor_points):
+    anchor_points = anchor_points[[2,5],:]
+    classes = p.zeros(image.shape[1])
+    for i in anchor_points.shape[0]:
+        anchor_point = get(get_pixel_value, anchor_points[i,:])
+        classes[anchor_point[0]] = 1.0
+    return classes
+
+def get_pixel_value(image, anchor_point):
+    x = min(max(0,int(anchor_point[0])), image.shape[1])
+    y = min(max(0,int(anchor_point[1])), image.shape[0])
+    return np.array([x,y])
+
+def create_image_data(image, anchor_points, size, shift_percentage, targets_fn):
     scale = (1.0*size[0])/image.shape[0]
     image, anchor_points = resize(image, anchor_points, scale)
 #     print 'C'
@@ -102,22 +131,18 @@ def create_image_data(image, anchor_points, size, shift_percentage):
     image, anchor_points = crop(image, anchor_points, size, shift_percentage)
 #     print 'D'
 #     print anchor_points     
-    displacements = calculate_displacements(image, anchor_points)
+    targets = targets_fn(image, anchor_points)
     image = 1.0*np.expand_dims(image, axis=0)
-    return image, anchor_points, displacements
+    return image, anchor_points, targets
 
-from simplelmdb import Simplelmdb
-import lmdb
-import numpy as np
-import lmdb
-import msgpack
-import msgpack_numpy as m
-m.patch()
-import random
-import shutil
-import os
+TARGETS_FN = {
+    'calculate_2_anchor_pixel_classification' : calculate_2_anchor_pixel_classification,
+    'calculate_6_anchor_displacements' : calculate_6_anchor_displacements,
+    'calculate_2_anchor_displacements' : calculate_2_anchor_displacements,
+    'calculate_2_anchor_pixel_classification' : calculate_2_anchor_pixel_classification
+}
 
-def create_dataset(save_file, images, source, size=(224,224), shuffle=False, data_max=None, data_min=None, num_shifts=1, use_front=False):    
+def create_dataset(save_file, images, source, targets_fn, num_features, size=(224,224), shuffle=False, data_max=None, data_min=None, num_shifts=1, use_front=False, normalize_targets=False):    
     n = len(images)*(1+num_shifts)
     map_size = n * size[0]*size[1]*8 * 20
 
@@ -130,7 +155,7 @@ def create_dataset(save_file, images, source, size=(224,224), shuffle=False, dat
     front_to_topdown_transformation = source['front_to_topdown_transformation']
     topdown_to_front_transformation = source['topdown_to_front_transformation']  
     
-    targets = np.zeros((n, 6))
+    targets = np.zeros((n, num_features))
     with env.begin(write=True) as txn:
         for i in range(len(images)):
             shift_percentages = (np.random.random(num_shifts+1)*2)-1
@@ -145,7 +170,7 @@ def create_dataset(save_file, images, source, size=(224,224), shuffle=False, dat
 
                 sample_anchor_points = np.copy(anchor_points)
                 shift_percentage = shift_percentages[j]
-                image_data, sample_anchor_points, displacements = create_image_data(image, sample_anchor_points, size, shift_percentage)  
+                image_data, sample_anchor_points, displacements = create_image_data(image, sample_anchor_points, size, shift_percentage, targets_fn)  
                 image_index = i*(1+num_shifts) + j
                 targets[image_index,:] = displacements
                 sample = {
@@ -160,27 +185,32 @@ def create_dataset(save_file, images, source, size=(224,224), shuffle=False, dat
                 if image_index % 1000 ==0:
                     print image_index
                     env.sync()
-    
-        print "Normalizing"
-        
+
         low = 0.1
         high = 0.9    
-            
-        normalized_targets, data_min, data_max = normalize_to_range(targets, low, high, data_min=data_min, data_max=data_max)
-        for image_index in range(n):
-            key = str(image_index)
-            sample_encoded = txn.get(key)            
-            sample = msgpack.unpackb(sample_encoded, object_hook=m.decode)
-            sample['image_targets'] = normalized_targets[image_index]
-            sample_encoded = msgpack.packb(sample, default=m.encode) 
-            txn.put(key, sample_encoded)
+        data_min = None
+        data_max = None
 
-    db = Simplelmdb(save_file)       
-    db.put('low', low)
-    db.put('high', high)
-    db.put('data_max', data_max)
-    db.put('data_min', data_min)
+        if normalize_targets:                
+            print "Normalizing"
+            normalized_targets, data_min, data_max = normalize_to_range(targets, low, high, data_min=data_min, data_max=data_max)
+
+            for image_index in range(n):
+                key = str(image_index)
+                sample_encoded = txn.get(key)            
+                sample = msgpack.unpackb(sample_encoded, object_hook=m.decode)
+                sample['image_targets'] = normalized_targets[image_index]
+                sample_encoded = msgpack.packb(sample, default=m.encode) 
+                txn.put(key, sample_encoded)
+
+    db = Simplelmdb(save_file)
     db.put('num_records', n)
+    if normalize_targets:       
+        db.put('low', low)
+        db.put('high', high)
+        db.put('data_max', data_max)
+        db.put('data_min', data_min)
+
     return data_min, data_max
             
 def normalize_to_range(data,low, high, data_min=None, data_max=None):
